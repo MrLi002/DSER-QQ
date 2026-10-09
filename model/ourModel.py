@@ -86,9 +86,9 @@ class Model:
             os.mkdir("./train/checkpoint")
         torch.save(checkpoint, './train/checkpoint/ckpt_%s.pth' % (str(epoch)))
 
-    def inference(self, imgs, voxels, mask):
+    def inference(self, imgs, voxels, mask, tau=None):
         imgs, voxels, mask = self.size_adapter.pad(imgs, voxels, mask)
         self.eval()
-        _, _, _, pred, _, _ = self.my_net(imgs, voxels, mask, self.args.bins)
+        _, _, _, pred, _, _ = self.my_net(imgs, voxels, mask, self.args.bins, tau=tau)
         pred = self.size_adapter.unpad(pred[0])
         return pred
