@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scenes", nargs="*", default=None, help="Optional scene allow-list")
 
+    parser.add_argument("--qt-epa", action="store_true", help="Enable QT-EPA offset refinement")
     parser.add_argument("--bins", default=8, type=int)
     parser.add_argument("--skips", nargs="+", default=[1, 3], type=int)
     parser.add_argument("--crop-size", default=256, type=int)
@@ -132,10 +133,19 @@ def load_network_weights(
 ) -> None:
     checkpoint = _torch_load(path)
     state_dict = _extract_state_dict(checkpoint)
+    state_dict = {
+        key.replace(".transformer_block.to_patch_embedding2.0.",
+                    ".transformer_block.to_patch_embedding.1."): value
+        for key, value in state_dict.items()
+    }
     incompatible = model.load_state_dict(state_dict, strict=strict)
     if not strict:
-        print(f"Missing keys: {list(incompatible.missing_keys)}")
-        print(f"Unexpected keys: {list(incompatible.unexpected_keys)}")
+        missing = list(incompatible.missing_keys)
+        unexpected = list(incompatible.unexpected_keys)
+        print(f"Missing keys: {missing}")
+        print(f"Unexpected keys: {unexpected}")
+        if unexpected or any(not k.startswith("TNet.qt_epa.") for k in missing):
+            raise RuntimeError("Partial pretrained load is only permitted for new QT-EPA parameters")
 
 
 def resume_training(
@@ -244,6 +254,8 @@ def save_checkpoint(
 
 
 def train(args: argparse.Namespace) -> None:
+    if args.qt_epa and args.bins < 2:
+        raise ValueError("QT-EPA requires --bins >= 2")
     if args.resume and args.pretrained:
         raise ValueError("--resume and --pretrained are mutually exclusive")
     if args.epochs <= 0 or args.batch_size <= 0:
@@ -361,7 +373,8 @@ def train(args: argparse.Namespace) -> None:
 
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.amp):
-                outputs = model(imgs, voxels, mask, args.bins)
+                tau = batch["tau"].to(device, non_blocking=True)
+                outputs = model(imgs, voxels, mask, args.bins, tau=tau)
                 losses = compute_losses(
                     outputs, gt, mask, perceptual, structural_loss, args
                 )
