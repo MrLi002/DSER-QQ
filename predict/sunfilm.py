@@ -52,7 +52,8 @@ def predict_snufilm(model, num_bins, device, save_path, data_root, difficulties=
                 events_t1 = EventSequence.from_npz_files(after_event_paths, h, w)
                 event_voxel, mask = get_voxel_and_mask(num_bins, events_0t, events_t1, h, w)
                 with torch.no_grad():
-                    pred = model.inference(imgs, event_voxel, mask)
+                    tau = torch.tensor([(event_index[1] - event_index[0]) / (event_index[2] - event_index[0])], device=device)
+                    pred = model.inference(imgs, event_voxel, mask, tau=tau)
                 pred_out = (pred[0].cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                 psnr = psnr_(gt, pred_out)
                 ssim = ssim_(gt, pred_out)
