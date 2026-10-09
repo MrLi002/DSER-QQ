@@ -54,7 +54,8 @@ def predict_vimeo90k(model, num_bins, device, save_path, data_root, isSave=False
             events_t1 = EventSequence.from_npz_files(after_event_paths, h, w)
             event_voxel, mask = get_voxel_and_mask(num_bins, events_0t, events_t1, h, w)
             with torch.no_grad():
-                pred = model.inference(imgs, event_voxel, mask)
+                tau = torch.tensor([0.5], device=device)
+                pred = model.inference(imgs, event_voxel, mask, tau=tau)
             pred_out = (pred[0].clip(0.0, 1.0).cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
             psnr = psnr_(gt, pred_out)
             ssim = ssim_(gt, pred_out)
