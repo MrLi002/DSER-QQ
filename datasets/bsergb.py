@@ -326,6 +326,7 @@ class BSERGBTrainDataset(Dataset):
             "target_index": target,
             "end_index": end,
             "skip": skip,
+            "tau": torch.tensor((target - start) / (end - start), dtype=torch.float32),
         }
 
 
