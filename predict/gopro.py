@@ -40,7 +40,8 @@ def predict_gopro(model, bins, device, save_path, data_root, multis=[7,15], isSa
                         mask = mask.to(device, non_blocking=True)
                         event_voxel = event_voxel.to(device, non_blocking=True)
                         with torch.no_grad():
-                            pred = model.inference(imgs, event_voxel, mask)
+                            tau = torch.tensor([(gt_index - img_index0) / (img_index1 - img_index0)], device=device)
+                            pred = model.inference(imgs, event_voxel, mask, tau=tau)
                         pred_out = (pred[0].cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                         psnr = psnr_(gt, pred_out)
                         ssim = ssim_(gt, pred_out)
