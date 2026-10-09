@@ -83,7 +83,8 @@ def predict_hsergb(model, num_bins, device, save_path, data_root, multis=[5, 7],
                                 event_voxel, mask = get_voxel_and_mask(num_bins, events_0t, events_t1, h, w)
 
                                 with torch.no_grad():
-                                    pred = model.inference(imgs, event_voxel, mask)
+                                    tau = torch.tensor([(gt_index - img_index0) / (img_index1 - img_index0)], device=device)
+                                    pred = model.inference(imgs, event_voxel, mask, tau=tau)
                                 pred_out = (pred[0].cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                                 psnr = psnr_(gt, pred_out)
                                 ssim = ssim_(gt, pred_out)
