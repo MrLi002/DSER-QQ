@@ -112,7 +112,8 @@ def predict_bsergb(model,num_bins,device,save_path,data_root,multis=(1, 3, 5),is
                     mask = mask.to(device, non_blocking=True)
 
                     with torch.no_grad():
-                        prediction = model.inference(imgs, event_voxel, mask)
+                        tau = torch.tensor([(target_index - image_index0) / (image_index1 - image_index0)], device=device)
+                        prediction = model.inference(imgs, event_voxel, mask, tau=tau)
                     prediction = prediction[0].clamp(0.0, 1.0)
                     pred_out = (
                         prediction.cpu().numpy().transpose(1, 2, 0) * 255.0
