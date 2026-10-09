@@ -96,6 +96,7 @@ def main(args):
             args.bins,
             device,
             save_path,
+            data_root=args.data_root_path,
             multis=[5, 7],
             isSave=False,
             isTestPer=False,
