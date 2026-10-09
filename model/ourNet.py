@@ -14,7 +14,7 @@ class MyNet(nn.Module):
         self.beta = args.beta
         self.mask_patch_size = args.mask_patch_size
         self.event_rec = EventRecNet(2 * bins)
-        self.TNet = FeaTNet(bins)
+        self.TNet = FeaTNet(bins, use_qt_epa=getattr(args, 'qt_epa', False))
         self.fusion = DenseBlock(64, 3)
         unit_dim = 32
         self.scale = 3
@@ -23,7 +23,7 @@ class MyNet(nn.Module):
         self.encoder_ref = ref_encoder(3, unit_dim // 2)
         self.sys = Transformer(unit_dim * 2)
 
-    def forward(self, imgs, voxels, mask, bins):
+    def forward(self, imgs, voxels, mask, bins, tau=None):
         img0 = imgs[:, :3]
         img1 = imgs[:, 6:9]
         v0t = voxels[:, :bins]
@@ -35,8 +35,11 @@ class MyNet(nn.Module):
         rec = pure_rec * mask
 
         # 第二阶段
-        F0 = self.TNet(img0, img1, v0t, rec)
-        F1 = self.TNet(img1, img0, v1t, rec)
+        if getattr(self.TNet, 'use_qt_epa', False) and tau is None:
+            raise ValueError('QT-EPA enabled but tau was not provided')
+        reverse_tau = None if tau is None else 1.0 - tau
+        F0 = self.TNet(img0, img1, v0t, rec, tau)
+        F1 = self.TNet(img1, img0, v1t, rec, reverse_tau)
         Ft = self.fusion(torch.cat((F0, F1), 1))
 
         # 第三阶段
