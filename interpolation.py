@@ -24,6 +24,7 @@ def parse_args():
         default="bsergb",
         choices=("vimeo90k", "gopro", "snufilm", "hsergb", "bsergb"),
     )
+    parser.add_argument("--qt-epa", action="store_true", help="Use QT-EPA architecture (requires QT-EPA checkpoint)")
     parser.add_argument("--bins", default=8, type=int)
     parser.add_argument("--beta", default=0.1, type=float)
     parser.add_argument("--mask_patch_size", default=32, type=int)
