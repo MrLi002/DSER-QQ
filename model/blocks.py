@@ -1,5 +1,6 @@
 import torch.nn.functional as F
 import torchvision
+from model.qt_epa import QTEPA
 from model.submodules import *
 
 
@@ -142,11 +143,18 @@ class OffsetEstimator(nn.Module):
 
 
 class FeaTNet(nn.Module):
-    def __init__(self, bins):
+    def __init__(self, bins, use_qt_epa=False):
         super(FeaTNet, self).__init__()
         num_chs_frame = [3, 16, 32, 64, 128]
         num_chs_event = [bins, 16, 32, 64, 96]
         num_chs_ref = [1, 8, 16, 32, 64]
+        self.use_qt_epa = use_qt_epa
+        if use_qt_epa:
+            self.qt_epa = nn.ModuleList([
+                QTEPA(416, bins=bins),
+                QTEPA(224, bins=bins),
+                QTEPA(112, bins=bins),
+            ])
         self.frame_encoder = EncoderImage(num_chs_frame)
         self.event_encoder = EncoderEvent(num_chs_event)
         self.ref_encoder = EncoderRef(num_chs_ref)
@@ -173,7 +181,7 @@ class FeaTNet(nn.Module):
         ])
         self.lastconv = nn.ConvTranspose2d(num_chs_frame[-3], num_chs_frame[-3], 4, 2, 1)
 
-    def forward(self, img0, img1, v0, rec):
+    def forward(self, img0, img1, v0, rec, tau=None):
         F0_2, F0_1, F0_0 = self.frame_encoder(img0)
         F1_2, F1_1, F1_0 = self.frame_encoder(img1)
         E0_2, E0_1, E0_0 = self.event_encoder(v0)
@@ -183,12 +191,20 @@ class FeaTNet(nn.Module):
         # ------0------
         feat_t_in = torch.cat((F0_0, E0_0, R_0, F1_0), 1)  # B, 513
         off_0, m_0 = self.offset_estimator[0](feat_t_in)
+        if self.use_qt_epa:
+            if tau is None:
+                raise ValueError("QT-EPA requires query time tau")
+            off_0 = self.qt_epa[0](feat_t_in, v0, tau, off_0)
         F0_0_ = self.deform_conv[0](F0_0, off_0, m_0)
         off_0_up = resize_2d(off_0, F0_1)
 
         # ------1-------
         feat_t_in = torch.cat((F0_1, E0_1, R_1, F1_1), 1)
         off_1, m_1 = self.offset_estimator[1](feat_t_in, off_0_up)
+        if self.use_qt_epa:
+            if tau is None:
+                raise ValueError("QT-EPA requires query time tau")
+            off_1 = self.qt_epa[1](feat_t_in, v0, tau, off_1)
         F0_1_ = self.deform_conv[1](F0_1, off_1, m_1)
         off_1_up = resize_2d(off_1, F0_2)
         F0_0_up = resize_2d(F0_0_, F0_1)
@@ -198,6 +214,10 @@ class FeaTNet(nn.Module):
         # ------2-------
         feat_t_in = torch.cat((F0_2, E0_2, R_2, F1_2), 1)
         off_2, m_2 = self.offset_estimator[2](feat_t_in, off_1_up)
+        if self.use_qt_epa:
+            if tau is None:
+                raise ValueError("QT-EPA requires query time tau")
+            off_2 = self.qt_epa[2](feat_t_in, v0, tau, off_2)
         F0_2_ = self.deform_conv[2](F0_2, off_2, m_2)
         F0_1_up = resize_2d(F0_1_, F0_2)
         ref_2 = self.ref_proj_layers[1](R_2)
