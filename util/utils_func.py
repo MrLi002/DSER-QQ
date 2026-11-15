@@ -351,33 +351,42 @@ def events_to_channels(event: EventSequence):
     return torch.stack([pos_cnt, neg_cnt])
 
 
-def custom_erode(mask, kernel_size=3):
-    kernel = torch.ones((1, 1, kernel_size, kernel_size))
+def custom_erode(mask, kernel_size=3, delta=6):
+    """Invert a center only when more than delta neighbors disagree (Sec. III-A).
+
+    The center is excluded from the count. Outside-image pixels are zero,
+    matching the zero padding used for the following dilation. All decisions
+    use the original binary mask, so updates do not depend on traversal order.
+    """
+    if kernel_size <= 0 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd integer")
+    neighbor_count = kernel_size * kernel_size - 1
+    if not 0 <= delta <= neighbor_count:
+        raise ValueError("delta must be between zero and the neighbor count")
+    binary = (mask > 0).float()
+    kernel = binary.new_ones((1, 1, kernel_size, kernel_size))
     kernel[0, 0, kernel_size // 2, kernel_size // 2] = 0
-
-    neighbors_diff = F.conv2d(mask.float(), kernel, padding=kernel_size // 2)
-
-    change_to_1 = (mask == 0) & (neighbors_diff >= 5)
-    change_to_0 = (mask == 1) & (neighbors_diff <= 1)
-
-    mask[change_to_1] = 1
-    mask[change_to_0] = 0
-
-    return mask
+    active_neighbors = F.conv2d(binary, kernel, padding=kernel_size // 2)
+    different_neighbors = torch.where(
+        binary.bool(), neighbor_count - active_neighbors, active_neighbors
+    )
+    return torch.where(different_neighbors > delta, 1.0 - binary, binary)
 
 
 def dilate(mask, kernel_size=3):
-    kernel = torch.ones((1, 1, kernel_size, kernel_size))
+    kernel = mask.new_ones((1, 1, kernel_size, kernel_size), dtype=torch.float32)
     dilated = F.conv2d(mask.float(), kernel, padding=kernel_size // 2)
     dilated = (dilated > 0).float()
 
     return dilated
 
 
-def process_mask(mask, erode_kernel_size=3, dilate_kernel_size=7):
-    mask = torch.sum(mask, dim=0, keepdim=True)
-    mask[mask > 0] = 1
-    eroded_mask = custom_erode(mask.clone(), erode_kernel_size)
+def process_mask(mask, erode_kernel_size=3, dilate_kernel_size=5, delta=6):
+    """Build M from [C,H,W] or [B,C,H,W] event counts using paper defaults."""
+    if mask.ndim not in (3, 4):
+        raise ValueError("event counts must have shape [C,H,W] or [B,C,H,W]")
+    mask = (torch.sum(mask, dim=-3, keepdim=True) > 0).float()
+    eroded_mask = custom_erode(mask, erode_kernel_size, delta)
     dilated_mask = dilate(eroded_mask, dilate_kernel_size)
     return dilated_mask
 
@@ -436,15 +445,23 @@ def reconstruct_from_patches(patches, image_size):
     return reconstructed
 
 
+@torch.no_grad()
 def pyramid_patch_mask(img0, img1, event_mask, patch_size=32, beta=0.1):
-    difference_map = make_different_map(img0, img1)
+    """Select HCS patches using binary D_i * M and count >= beta*p (Eqs. 4-6)."""
+    if img0.shape != img1.shape or img0.ndim != 4:
+        raise ValueError("images must have identical [B,C,H,W] shapes")
+    if event_mask.shape != (img0.shape[0], 1, *img0.shape[-2:]):
+        raise ValueError("event_mask must have shape [B,1,H,W] matching the images")
+    if patch_size <= 0 or any(size % patch_size for size in img0.shape[-2:]):
+        raise ValueError("image height and width must be divisible by patch_size")
+    if beta < 0:
+        raise ValueError("beta must be non-negative")
+    difference_map = (make_different_map(img0, img1) > 0).float()
+    difference_map = difference_map * (event_mask > 0).float()
     patches = divide_into_patches(difference_map, patch_size)
     patch_sums = calculate_patch_sums(patches)
-    modified_patches = modify_patches_based_on_sums(patches, patch_sums, beta)
+    modified_patches = modify_patches_based_on_sums(patches, patch_sums, beta * patch_size)
     modified_difference_map = reconstruct_from_patches(modified_patches, difference_map.shape[2:])
-
-    event_mask_patched = generate_event_mask_patch_mask(event_mask, patch_size)
-    modified_difference_map = modified_difference_map * event_mask_patched
 
     dm_0 = modified_difference_map
     dm_1 = down_sample_mask(modified_difference_map)
@@ -453,15 +470,8 @@ def pyramid_patch_mask(img0, img1, event_mask, patch_size=32, beta=0.1):
 
 
 def mask_reverse(mask1, mask2):
-    new_mask1 = mask1.clone()
-    new_mask2 = mask2.clone()
-
-    swap_condition = new_mask1 != new_mask2
-    temp = new_mask1[swap_condition].clone()
-    new_mask1[swap_condition] = new_mask2[swap_condition]
-    new_mask2[swap_condition] = temp
-
-    return new_mask1, new_mask2
+    """Route H1 to frame 0 and H0 to frame 1 (Sec. III-C2)."""
+    return mask2.clone(), mask1.clone()
 
 
 def generate_event_mask_patch_mask(event_mask, patch_size=32):
@@ -501,3 +511,4 @@ def pyramid_Img(Img):
     for i in range(1, 3):
         img_pyr.append(F.interpolate(Img, scale_factor=0.5 ** i, mode='bilinear'))
     return img_pyr
+
