@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from model.position_encoding import build_position_encoding
@@ -67,39 +68,61 @@ class TransformerBlock(nn.Module):
         self.out = nn.Conv2d(dim, channels, 3, 1, 1)
 
     def forward(self, img0, img1, mask=None):
+        """Gather both K/V and Q from HCS patches, then scatter a local residual.
+
+        img0 is the supporting keyframe and img1 is the synthesized feature.
+        mask is already reversed by MyNet, so the frame-0 branch receives H1.
+        Empty selections produce zero residuals without running a softmax.
+        """
+        if img0.shape != img1.shape or img0.ndim != 4:
+            raise ValueError("support and query features must have identical [B,C,H,W] shapes")
         B, C, H, W = img0.shape
-        # img0 : B, 256, 64, 64
-        img0 = self.to_patch_embedding(img0)
-        img1 = self.to_patch_embedding(img1)
-        b, n, c = img0.shape
+        if H % self.patch_size or W % self.patch_size:
+            raise ValueError("feature height and width must be divisible by patch_size")
+        if mask is None:
+            mask = img1.new_ones((B, 1, H, W))
+        if mask.shape != (B, 1, H, W):
+            raise ValueError("mask must have shape [B,1,H,W] matching the features")
+        selected = F.max_pool2d(
+            (mask > 0).float(), kernel_size=self.patch_size, stride=self.patch_size
+        ).flatten(1).bool()
+        if not selected.any():
+            return img1 * 0.0
 
-        img0 += self.pos_embedding(img0)
-        img0 = self.dropout(img0)
-        img1 += self.pos_embedding(img1)
-        img1 = self.dropout(img1)
+        support_tokens = self.to_patch_embedding(img0)
+        query_tokens = self.to_patch_embedding(img1)
+        _, n, c = query_tokens.shape
+        positions = self.pos_embedding(query_tokens).to(dtype=query_tokens.dtype)
+        support_tokens = self.dropout(support_tokens + positions)
+        query_tokens = self.dropout(query_tokens + positions)
 
-        img0_kv = self.img0_to_kv(img0).reshape(b, n, 2, self.head, c // self.head).permute(2, 0, 3, 1, 4)
-        img0_k, img0_v = img0_kv[0], img0_kv[1]
-
-        img1_qv = self.img1_to_qv(img1).reshape(b, n, 2, c).permute(2, 0, 1, 3)
-        img1_q, img1_v = img1_qv[0], img1_qv[1]
-        img1_q = img1_q.reshape(b, n, self.head, c // self.head).permute(0, 2, 1, 3)
-
-        img1_dots = img1_q @ img0_k.transpose(-2, -1).contiguous() * self.scale
-        mask = mask.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-        mask = mask.contiguous().view(B, 1, -1, self.patch_size, self.patch_size)
-        mask = mask.sum(dim=[3, 4])
-        mask[mask > 0] = 1
-        mask = mask.unsqueeze(1).repeat(1, self.head, n, 1)
-        mask = mask.masked_fill(mask == 0, float(-100.0)).masked_fill(mask == 1, float(0.0))
-        img1_dots = img1_dots + mask
-
-        img1_attn = self.softmax(img1_dots)
-        img1_out = (img1_attn @ img0_v).transpose(1, 2).reshape(b, n, c)
-        img1_res = self.mlp2(img1_out)
-        img1_res = rearrange(img1_res, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', p1=self.patch_size, p2=self.patch_size,
-                             h=H // self.patch_size)
-        return img1_res
+        residuals = []
+        for batch_index in range(B):
+            indices = selected[batch_index].nonzero(as_tuple=True)[0]
+            if indices.numel() == 0:
+                residuals.append(img1[batch_index:batch_index + 1] * 0.0)
+                continue
+            support = support_tokens[batch_index:batch_index + 1].index_select(1, indices)
+            query = query_tokens[batch_index:batch_index + 1].index_select(1, indices)
+            count = indices.numel()
+            kv = self.img0_to_kv(support).reshape(
+                1, count, 2, self.head, c // self.head
+            ).permute(2, 0, 3, 1, 4)
+            key, value = kv[0], kv[1]
+            # Keep the released Q/V projection shape for checkpoint compatibility.
+            query = self.img1_to_qv(query).chunk(2, dim=-1)[0]
+            query = query.reshape(1, count, self.head, c // self.head).transpose(1, 2)
+            attention = self.softmax((query @ key.transpose(-2, -1)) * self.scale)
+            attended = (attention @ value).transpose(1, 2).reshape(1, count, c)
+            local_residual = self.mlp2(attended)
+            full_residual = local_residual.new_zeros(
+                (1, n, C * self.patch_size * self.patch_size)
+            ).index_copy(1, indices, local_residual)
+            residuals.append(rearrange(
+                full_residual, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+                p1=self.patch_size, p2=self.patch_size, h=H // self.patch_size,
+            ))
+        return torch.cat(residuals, dim=0)
 
 
 class DetailsSup(nn.Module):
@@ -114,8 +137,21 @@ class DetailsSup(nn.Module):
         )
 
     def forward(self, imgt, img0, img1, f_up, corr0, corr1):
+        # The global decoder's upsampled feature is the baseline outside H0 U H1.
+        repair_mask = ((corr0 > 0) | (corr1 > 0)).float()
+        if not repair_mask.any():
+            return f_up
         imgt_from_img0 = imgt + self.transformer_block(img0, imgt, corr0)
         imgt_from_img1 = imgt + self.transformer_block(img1, imgt, corr1)
         imgt = self.upsample(torch.cat((imgt_from_img0, imgt_from_img1), 1))
         out = self.fusion_block(torch.cat((imgt, f_up), 1))
-        return out
+        repair_mask = F.max_pool2d(
+            repair_mask,
+            kernel_size=self.transformer_block.patch_size,
+            stride=self.transformer_block.patch_size,
+        )
+        repair_mask = F.interpolate(repair_mask, size=f_up.shape[-2:], mode='nearest').bool()
+        # Apply the fused candidate only inside selected patches. This also
+        # prevents convolutional biases and receptive fields leaking repairs.
+        return torch.where(repair_mask, out, f_up)
+

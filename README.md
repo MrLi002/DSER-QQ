@@ -84,7 +84,20 @@ The defaults follow the paper where they are available: skips 1 and 3, eight
 event bins per temporal segment, 256x256 crops, AdamW, 40 epochs, and cosine
 learning-rate decay from 1e-4 to 1e-6. Use the --help option for all settings.
 
+## Paper-aligned event masks and BASR
+
+The event-aware mask now uses the paper's 3x3 differing-neighbor rule
+(strictly more than delta=6) followed by 5x5 dilation. BASR selects patches
+from binary RGB differences intersected with the event mask, using the
+threshold beta * patch_size. Both query and support tokens are selected;
+repairs are written only inside the selected regions, with a safe identity
+path for empty selections. Parameter names and shapes are unchanged.
+
+See [the implementation notes](docs/paper_ears_basr.md) for equation mappings,
+checkpoint compatibility, and verification commands.
+
 ## Citation
+
 If you find this code or paper useful for your research, please cite:
 
 ```bibtex
@@ -97,3 +110,4 @@ If you find this code or paper useful for your research, please cite:
 
 ## Acknowledgements
 The event simulation uses [v2e](https://github.com/SensorsINI/v2e).
+
